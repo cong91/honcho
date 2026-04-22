@@ -6,7 +6,6 @@ import time
 from contextlib import suppress
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import crud, exceptions, models, schemas
@@ -567,13 +566,19 @@ class RepresentationManager:
             top_k=count,
             filters=self._build_filter_conditions(
                 level,
-                memory_domains=(filters or {}).get("metadata.memory.domain", {}).get("in")
+                memory_domains=(filters or {})
+                .get("metadata.memory.domain", {})
+                .get("in")
                 if isinstance((filters or {}).get("metadata.memory.domain"), dict)
                 else None,
-                memory_horizons=(filters or {}).get("metadata.memory.horizon", {}).get("in")
+                memory_horizons=(filters or {})
+                .get("metadata.memory.horizon", {})
+                .get("in")
                 if isinstance((filters or {}).get("metadata.memory.horizon"), dict)
                 else None,
-                memory_thesis_kinds=(filters or {}).get("metadata.memory.thesis_kind", {}).get("in")
+                memory_thesis_kinds=(filters or {})
+                .get("metadata.memory.thesis_kind", {})
+                .get("in")
                 if isinstance((filters or {}).get("metadata.memory.thesis_kind"), dict)
                 else None,
             ),

@@ -3,7 +3,17 @@ from collections.abc import Callable
 from logging import getLogger
 from typing import Any, TypeVar
 
-from sqlalchemy import ColumnElement, DateTime, Select, and_, case, cast, literal, not_, or_
+from sqlalchemy import (
+    ColumnElement,
+    DateTime,
+    Select,
+    and_,
+    case,
+    cast,
+    literal,
+    not_,
+    or_,
+)
 from sqlalchemy.types import Numeric
 
 from ..exceptions import FilterError
@@ -420,7 +430,9 @@ def _build_nested_metadata_conditions(
                     else and_(*field_conditions)
                 )
         elif isinstance(field_value, dict):
-            nested_condition = _build_json_path_condition(column, [field_name], field_value)
+            nested_condition = _build_json_path_condition(
+                column, [field_name], field_value
+            )
             if nested_condition is not None:
                 conditions.append(nested_condition)
         else:
@@ -443,8 +455,10 @@ def _build_json_path_condition(
     if value == "*":
         return None
 
-    if len(json_path) == 1 and isinstance(value, dict) and not any(
-        op in COMPARISON_OPERATORS for op in value
+    if (
+        len(json_path) == 1
+        and isinstance(value, dict)
+        and not any(op in COMPARISON_OPERATORS for op in value)
     ):
         return _build_nested_metadata_conditions(column[json_path[0]], value)
 

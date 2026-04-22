@@ -521,12 +521,12 @@ class Conclusion(BaseModel):
         internal_metadata = getattr(data, "internal_metadata", None) or {}
         memory = internal_metadata.get("memory")
         return {
-            "id": getattr(data, "id"),
-            "content": getattr(data, "content"),
-            "observer": getattr(data, "observer"),
-            "observed": getattr(data, "observed"),
-            "session_name": getattr(data, "session_name"),
-            "created_at": getattr(data, "created_at"),
+            "id": data.id,
+            "content": data.content,
+            "observer": data.observer,
+            "observed": data.observed,
+            "session_name": data.session_name,
+            "created_at": data.created_at,
             "memory": memory,
         }
 

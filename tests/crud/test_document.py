@@ -1,5 +1,4 @@
 import datetime
-from unittest.mock import patch
 
 import pytest
 from nanoid import generate as generate_nanoid

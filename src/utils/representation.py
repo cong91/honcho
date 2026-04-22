@@ -1,6 +1,6 @@
+import re
 from collections.abc import Sequence
 from datetime import datetime
-import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -144,11 +144,11 @@ class PromptRepresentation(BaseModel):
             if not candidate:
                 continue
             candidate = re.sub(r"^[-*•\d\.)\s]+", "", candidate).strip()
-            if not candidate or candidate in {'{', '}', '[', ']'}:
+            if not candidate or candidate in {"{", "}", "[", "]"}:
                 continue
-            if '"content"' in candidate or candidate.lower().startswith('explicit'):
+            if '"content"' in candidate or candidate.lower().startswith("explicit"):
                 continue
-            candidate = candidate.strip('"\' ,')
+            candidate = candidate.strip("\"' ,")
             if len(candidate) < 12:
                 continue
             observations.append(ExplicitObservationBase(content=candidate))
@@ -277,7 +277,38 @@ class Representation(BaseModel):
     contradiction: list[ContradictionObservation] = Field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.explicit or self.deductive or self.inductive or self.contradiction)
+        return not (
+            self.explicit or self.deductive or self.inductive or self.contradiction
+        )
+
+    def merge_representation(
+        self, other: "Representation", max_observations: int | None = None
+    ) -> None:
+        merged_explicit = list(dict.fromkeys([*self.explicit, *other.explicit]))
+        merged_deductive = list(dict.fromkeys([*self.deductive, *other.deductive]))
+        merged_inductive = list(dict.fromkeys([*self.inductive, *other.inductive]))
+        merged_contradiction = list(
+            dict.fromkeys([*self.contradiction, *other.contradiction])
+        )
+
+        merged_explicit.sort(key=lambda obs: obs.created_at)
+        merged_deductive.sort(key=lambda obs: obs.created_at)
+        merged_inductive.sort(key=lambda obs: obs.created_at)
+        merged_contradiction.sort(key=lambda obs: obs.created_at)
+
+        if max_observations is not None:
+            merged_explicit = merged_explicit[-max_observations:]
+            merged_deductive = merged_deductive[-max_observations:]
+            merged_inductive = merged_inductive[-max_observations:]
+            merged_contradiction = merged_contradiction[-max_observations:]
+
+        self.explicit = merged_explicit
+        self.deductive = merged_deductive
+        self.inductive = merged_inductive
+        self.contradiction = merged_contradiction
+
+    def format_as_markdown(self, include_ids: bool = False) -> str:
+        return self.to_markdown(include_ids=include_ids)
 
     def to_markdown(self, include_ids: bool = False) -> str:
         parts: list[str] = []
@@ -302,7 +333,9 @@ class Representation(BaseModel):
             parts.append("## Inductive Observations\n")
             for obs in self.inductive:
                 id_prefix = f"[id:{obs.id}] " if include_ids and obs.id else ""
-                parts.append(f"{id_prefix} **Pattern** [{obs.confidence}]: {obs.conclusion}")
+                parts.append(
+                    f"{id_prefix} **Pattern** [{obs.confidence}]: {obs.conclusion}"
+                )
                 if obs.pattern_type:
                     parts.append(f"   **Type**: {obs.pattern_type}")
                 if obs.sources:
@@ -332,9 +365,13 @@ class Representation(BaseModel):
             explicit=[
                 ExplicitObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
+                    created_at=_safe_datetime_from_metadata(
+                        doc.internal_metadata, doc.created_at
+                    ),
                     content=doc.content,
-                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
+                    message_ids=flatten_message_ids(
+                        doc.internal_metadata.get("message_ids", [])
+                    ),
                     session_name=doc.session_name,
                 )
                 for doc in documents
@@ -343,11 +380,16 @@ class Representation(BaseModel):
             deductive=[
                 DeductiveObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
+                    created_at=_safe_datetime_from_metadata(
+                        doc.internal_metadata, doc.created_at
+                    ),
                     conclusion=doc.content,
-                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
+                    message_ids=flatten_message_ids(
+                        doc.internal_metadata.get("message_ids", [])
+                    ),
                     session_name=doc.session_name,
-                    source_ids=doc.source_ids or doc.internal_metadata.get("premise_ids", []),
+                    source_ids=doc.source_ids
+                    or doc.internal_metadata.get("premise_ids", []),
                     premises=doc.internal_metadata.get("premises", []),
                 )
                 for doc in documents
@@ -356,11 +398,14 @@ class Representation(BaseModel):
             inductive=[
                 InductiveObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
+                    created_at=_safe_datetime_from_metadata(
+                        doc.internal_metadata, doc.created_at
+                    ),
                     conclusion=doc.content,
                     message_ids=doc.internal_metadata.get("message_ids", []),
                     session_name=doc.session_name,
-                    source_ids=doc.source_ids or doc.internal_metadata.get("source_ids", []),
+                    source_ids=doc.source_ids
+                    or doc.internal_metadata.get("source_ids", []),
                     sources=doc.internal_metadata.get("sources", []),
                     pattern_type=doc.internal_metadata.get("pattern_type", "pattern"),
                     confidence=doc.internal_metadata.get("confidence", "medium"),
@@ -371,11 +416,16 @@ class Representation(BaseModel):
             contradiction=[
                 ContradictionObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
+                    created_at=_safe_datetime_from_metadata(
+                        doc.internal_metadata, doc.created_at
+                    ),
                     content=doc.content,
-                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
+                    message_ids=flatten_message_ids(
+                        doc.internal_metadata.get("message_ids", [])
+                    ),
                     session_name=doc.session_name,
-                    source_ids=doc.source_ids or doc.internal_metadata.get("source_ids", []),
+                    source_ids=doc.source_ids
+                    or doc.internal_metadata.get("source_ids", []),
                     sources=doc.internal_metadata.get("sources", []),
                 )
                 for doc in documents
@@ -414,7 +464,9 @@ def _safe_datetime_from_metadata(
         return _strip_microseconds_and_timezone(fallback_datetime)
     if isinstance(message_created_at, str):
         try:
-            return _strip_microseconds_and_timezone(parse_datetime_iso(message_created_at))
+            return _strip_microseconds_and_timezone(
+                parse_datetime_iso(message_created_at)
+            )
         except ValueError:
             return _strip_microseconds_and_timezone(fallback_datetime)
     if isinstance(message_created_at, datetime):

@@ -1,5 +1,3 @@
-import json
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -94,7 +92,9 @@ class TestDeriverStructuredOutputStability:
         )
         message_config = get_configuration(None, session, workspace)
 
-        empty_response = create_structured_deriver_response(PromptRepresentation(explicit=[]))
+        empty_response = create_structured_deriver_response(
+            PromptRepresentation(explicit=[])
+        )
         recovered_response = create_structured_deriver_response(
             PromptRepresentation(
                 explicit=[
@@ -151,7 +151,9 @@ class TestDeriverStructuredOutputStability:
         )
         message_config = get_configuration(None, session, workspace)
 
-        empty_response = create_structured_deriver_response(PromptRepresentation(explicit=[]))
+        empty_response = create_structured_deriver_response(
+            PromptRepresentation(explicit=[])
+        )
 
         caplog.set_level("WARNING")
 

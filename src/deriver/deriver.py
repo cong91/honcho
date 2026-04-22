@@ -51,15 +51,18 @@ def _build_deriver_call_kwargs(
     prompt: str,
     max_tokens: int,
     json_mode: bool,
-    response_model: type[PromptRepresentation] | None = PromptRepresentati...[truncated]
+    response_model: type[PromptRepresentation] | None = PromptRepresentation,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
         "prompt": prompt,
         "max_tokens": max_tokens,
         "track_name": "Minimal Deriver",
-        "response_model": PromptRepresentation,
+        "model_config": model_config,
         "max_input_tokens": settings.DERIVER.MAX_INPUT_TOKENS,
         "enable_retry": True,
         "retry_attempts": 3,
         "trace_name": "minimal_deriver",
+        "response_model": response_model,
     }
     if json_mode:
         kwargs["json_mode"] = True
@@ -183,8 +186,13 @@ async def process_representation_tasks_batch(
 
     message_ids = [m.id for m in messages if m.peer_name == observed]
 
+    prompt_representation = (
+        response.content
+        if isinstance(response.content, PromptRepresentation)
+        else PromptRepresentation(explicit=[])
+    )
     observations = Representation.from_prompt_representation(
-        response.content,
+        prompt_representation,
         message_ids,
         latest_message.session_name,
         latest_message.created_at,
@@ -203,14 +211,19 @@ async def process_representation_tasks_batch(
         raw_output = _serialize_llm_content(retry_response.content)
         response = retry_response
         retried_without_json_mode = True
+        retry_prompt_representation = (
+            response.content
+            if isinstance(response.content, PromptRepresentation)
+            else PromptRepresentation(explicit=[])
+        )
         observations = Representation.from_prompt_representation(
-            response.content,
+            retry_prompt_representation,
             message_ids,
             latest_message.session_name,
             latest_message.created_at,
         )
 
-    if observations.is_empty() and message_ids and raw_output:
+    if observations.is_empty() and message_ids and raw_output and isinstance(response.content, str):
         plain_text_representation = PromptRepresentation.from_plain_text(raw_output)
         observations = Representation.from_prompt_representation(
             plain_text_representation,

@@ -1,8 +1,9 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 from nanoid import generate as generate_nanoid
 from sqlalchemy.ext.asyncio import AsyncSession
-from unittest.mock import AsyncMock, patch
 
 from src import models
 from src.models import Peer, Workspace
@@ -636,7 +637,9 @@ class TestConclusionRoutes:
             name=str(generate_nanoid()), workspace_name=test_workspace.name
         )
 
-        with patch("src.routers.conclusions.crud.query_documents", new_callable=AsyncMock) as mock_query:
+        with patch(
+            "src.routers.conclusions.crud.query_documents", new_callable=AsyncMock
+        ) as mock_query:
             mock_query.return_value = []
             response = client.post(
                 f"/v3/workspaces/{test_workspace.name}/conclusions/query",
@@ -656,9 +659,13 @@ class TestConclusionRoutes:
         assert response.status_code == 200
         kwargs = mock_query.await_args.kwargs
         assert kwargs["exclude_expired"] is False
-        assert kwargs["filters"]["metadata.memory.domain"] == {"in": ["user:preferences"]}
+        assert kwargs["filters"]["metadata.memory.domain"] == {
+            "in": ["user:preferences"]
+        }
         assert kwargs["filters"]["metadata.memory.horizon"] == {"in": ["long"]}
-        assert kwargs["filters"]["metadata.memory.thesis_kind"] == {"in": ["preference"]}
+        assert kwargs["filters"]["metadata.memory.thesis_kind"] == {
+            "in": ["preference"]
+        }
 
     @pytest.mark.asyncio
     async def test_list_conclusions_excludes_expired_and_adds_lifecycle(
