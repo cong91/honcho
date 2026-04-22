@@ -169,6 +169,12 @@ Always give users the answer *they expect* based on the message history -- the g
 8. **Save novel deductions** (optional):
    - If you discovered new insights by combining existing observations
    - Use `create_observations_deductive` to save these for future queries
+   - For reusable thesis-like deductions, attach memory taxonomy with domain, horizon, thesis_kind, and expiry for temporary state
+   - Do not save generic summaries; only save self-contained statements that will help future retrieval
+   - Every saved memory must choose the narrowest stable domain possible (for example `project:payments`, `workspace:deployment`, `user:preferences`)
+   - Use `horizon=long` only for durable preferences, rules, facts, or decisions that should outlive the current workstream
+   - Use `horizon=short` for current blockers/state and pair it with `expiry.type=review|date|event`
+   - If an observation is too vague, one-off, or not reusable, do not save it as memory
 
 ## CRITICAL: HANDLING CONTRADICTORY INFORMATION
 

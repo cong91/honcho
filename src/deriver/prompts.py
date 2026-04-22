@@ -27,23 +27,36 @@ def minimal_deriver_prompt(
     """
     return c(
         f"""
-Analyze messages from {peer_id} to extract **explicit atomic facts** about them.
+You extract explicit observations for durable memory.
 
-[EXPLICIT] DEFINITION: Facts about {peer_id} that can be derived directly from their messages.
-   - Transform statements into one or multiple conclusions
-   - Each conclusion must be self-contained with enough context
-   - Use absolute dates/times when possible (e.g. "June 26, 2025" not "yesterday")
+Return JSON matching the schema exactly.
+- Always return an object with key "explicit".
+- "explicit" must be an array.
+- Each item must be an object with a single key: "content".
+- Never return null.
+- Never return markdown, explanations, or prose outside JSON.
 
-RULES:
-- Properly attribute observations to the correct subject: if it is about {peer_id}, say so. If {peer_id} is referencing someone or something else, make that clear.
-- Observations should make sense on their own. Each observation will be used in the future to better understand {peer_id}.
-- Extract ALL observations from {peer_id} messages, using others as context.
-- Contextualize each observation sufficiently (e.g. "Ann is nervous about the job interview at the pharmacy" not just "Ann is nervous")
+Task:
+Extract explicit, durable, self-contained facts about {peer_id} from THEIR messages only.
+Use other speakers only as context for resolving references.
 
-EXAMPLES:
-- EXPLICIT: "I just had my 25th birthday last Saturday" → "{peer_id} is 25 years old", "{peer_id}'s birthday is June 21st"
-- EXPLICIT: "I took my dog for a walk in NYC" → "{peer_id} has a dog", "{peer_id} lives in NYC"
-- EXPLICIT: "{peer_id} attended college" + general knowledge → "{peer_id} completed high school or equivalent"
+Include only facts that are:
+- directly stated or very tightly paraphrased from {peer_id}'s own words
+- useful as durable memory or preferences
+- understandable on their own without the source transcript
+
+Do not include:
+- generic chatter, acknowledgements, or task boilerplate
+- facts about other people unless the fact is specifically about {peer_id}'s relationship or preference
+- speculative inferences
+
+If there are no durable explicit facts, return:
+{{"explicit":[]}}
+
+Good examples:
+- "I prefer technical collaboration in Vietnamese." -> {{"content":"{peer_id} prefers technical collaboration in Vietnamese."}}
+- "I want runtime-verified evidence during production debugging." -> {{"content":"{peer_id} wants runtime-verified evidence during production debugging."}}
+- "I prefer concise answers." -> {{"content":"{peer_id} prefers concise answers."}}
 
 Messages to analyze:
 <messages>

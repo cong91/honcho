@@ -4,7 +4,10 @@ from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import models
-from src.crud.representation import RepresentationManager
+from src.crud.representation import (
+    RepresentationManager,
+    _prioritize_documents,
+)
 
 
 class TestRepresentationManagerSoftDelete:
@@ -134,3 +137,123 @@ class TestRepresentationManagerSoftDelete:
         result_ids = [doc.id for doc in results]
         assert doc_live.id in result_ids
         assert doc_deleted.id not in result_ids
+
+
+class TestRepresentationMemoryPrioritization:
+    def test_prioritize_documents_prefers_matching_taxonomy(self):
+        preference_doc = models.Document(
+            id="preference-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="User prefers concise replies",
+            internal_metadata={
+                "memory": {
+                    "domain": "user:preferences",
+                    "horizon": "long",
+                    "thesis_kind": "preference",
+                    "expiry": {"type": "none"},
+                }
+            },
+        )
+        state_doc = models.Document(
+            id="state-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="Current blocker is missing config",
+            internal_metadata={
+                "memory": {
+                    "domain": "project:current-state",
+                    "horizon": "short",
+                    "thesis_kind": "state",
+                    "expiry": {"type": "none"},
+                }
+            },
+        )
+
+        prioritized = _prioritize_documents(
+            [state_doc, preference_doc], query="what does the user prefer"
+        )
+
+        assert [doc.id for doc in prioritized] == ["preference-doc", "state-doc"]
+
+    def test_prioritize_documents_prefers_current_state_for_status_queries(self):
+        rule_doc = models.Document(
+            id="rule-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="Workspace policy requires approvals before deploy",
+            internal_metadata={
+                "memory": {
+                    "domain": "workspace:rule",
+                    "horizon": "long",
+                    "thesis_kind": "rule",
+                    "expiry": {"type": "none"},
+                }
+            },
+        )
+        state_doc = models.Document(
+            id="state-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="Current blocker is database migration failure",
+            internal_metadata={
+                "memory": {
+                    "domain": "project:current-state",
+                    "horizon": "short",
+                    "thesis_kind": "state",
+                    "expiry": {"type": "review", "review_at": "2026-04-22T01:00:00Z"},
+                }
+            },
+        )
+
+        prioritized = _prioritize_documents(
+            [rule_doc, state_doc], query="what is the current blocker right now"
+        )
+
+        assert [doc.id for doc in prioritized] == ["state-doc", "rule-doc"]
+
+    def test_prioritize_documents_prefers_domain_match_for_project_decisions(self):
+        project_decision_doc = models.Document(
+            id="project-decision-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="The payment service will use Stripe as the provider",
+            internal_metadata={
+                "memory": {
+                    "domain": "project:payments",
+                    "horizon": "medium",
+                    "thesis_kind": "decision",
+                    "expiry": {"type": "none"},
+                }
+            },
+        )
+        generic_decision_doc = models.Document(
+            id="generic-decision-doc",
+            workspace_name="workspace-a",
+            observer="observer-a",
+            observed="observed-b",
+            content="The team chose a new internal tool",
+            internal_metadata={
+                "memory": {
+                    "domain": "workspace:operations",
+                    "horizon": "medium",
+                    "thesis_kind": "decision",
+                    "expiry": {"type": "none"},
+                }
+            },
+        )
+
+        prioritized = _prioritize_documents(
+            [generic_decision_doc, project_decision_doc],
+            query="why did we decide the payments architecture this way",
+        )
+
+        assert [doc.id for doc in prioritized] == [
+            "project-decision-doc",
+            "generic-decision-doc",
+        ]

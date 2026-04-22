@@ -404,12 +404,37 @@ When statements can't both be true (not just updates), flag them:
 
 Use `create_observations_deductive`.
 
+When an observation is likely to be reused later, attach memory taxonomy:
+- `domain`: use a stable namespace like `user:preferences`, `project:current-state`, `project:decision`, `workspace:rule`, `environment:fact`
+- `horizon`: `short` for temporary state, `medium` for active project decisions/plans, `long` for durable rules/preferences/facts
+- `thesis_kind`: choose from `preference|fact|decision|plan|state|rule`
+- `expiry`: use `review` or `date` when the observation may go stale; use `none` for durable knowledge
+
+Heuristics:
+- stable user preference -> `domain=user:preferences`, `horizon=long`, `thesis_kind=preference`
+- project architecture or product choice -> `domain=project:decision`, `horizon=medium` or `long`, `thesis_kind=decision`
+- current blocker/status -> `domain=project:current-state`, `horizon=short`, `thesis_kind=state`, usually with expiry
+- workspace convention or standing instruction -> `domain=workspace:rule`, `horizon=long`, `thesis_kind=rule`
+
+Guardrails:
+- Do not save generic summaries, vague labels, or observations that simply restate the prompt
+- Every saved memory must be self-contained and directly reusable in a later query without extra context
+- Pick the narrowest stable domain you can defend from evidence; prefer `project:payments` over broad buckets like `project:general`
+- Use `long` only when the claim is durable beyond the current episode; temporary blockers and changing status should stay `short` with expiry
+- If the evidence only supports a transient update, save it as `state` or `plan`, not as a durable `fact` or `rule`
+
 ```json
 {{
   "observations": [{{
     "content": "The logical conclusion",
     "source_ids": ["id1", "id2"],
-    "premises": ["premise 1 text", "premise 2 text"]
+    "premises": ["premise 1 text", "premise 2 text"],
+    "memory": {{
+      "domain": "project:decision",
+      "horizon": "medium",
+      "thesis_kind": "decision",
+      "expiry": {{"type": "none"}}
+    }}
   }}]
 }}
 ```
@@ -546,6 +571,20 @@ Create inductive observations when you see patterns:
 
 Use `create_observations_inductive`.
 
+For stable patterns that should be remembered and retrieved later, attach memory taxonomy:
+- preference-like pattern -> `domain=user:preferences`, `horizon=long`, `thesis_kind=preference`
+- durable behavioral or workflow regularity -> `domain=workspace:rule` or `project:rule`, `horizon=long`, `thesis_kind=rule`
+- medium-lived project pattern or plan tendency -> `domain=project:plan` or `project:current-state`, `horizon=medium`, `thesis_kind=plan` or `state`
+- temporary trend -> use `short` horizon and an expiry
+
+Only attach taxonomy when the pattern is genuinely reusable. Avoid tagging vague or one-off observations.
+
+Guardrails:
+- Save only stable patterns with enough evidence to matter later; do not store episode summaries as inductive memory
+- Use `long` only for tendencies and preferences that are likely to persist across future conversations
+- If the pattern is tied to an active workstream or temporary phase, prefer `medium` or `short` with expiry
+- Choose a domain that points to the actual area of behavior or work, not a catch-all bucket
+
 ```json
 {{
   "observations": [{{
@@ -553,7 +592,13 @@ Use `create_observations_inductive`.
     "source_ids": ["id1", "id2", "id3"],
     "sources": ["evidence 1", "evidence 2"],
     "pattern_type": "tendency",  // preference|behavior|personality|tendency|correlation
-    "confidence": "medium"  // low (2 sources), medium (3-4), high (5+)
+    "confidence": "medium",  // low (2 sources), medium (3-4), high (5+)
+    "memory": {{
+      "domain": "user:preferences",
+      "horizon": "long",
+      "thesis_kind": "preference",
+      "expiry": {{"type": "none"}}
+    }}
   }}]
 }}
 ```

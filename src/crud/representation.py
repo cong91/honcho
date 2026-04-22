@@ -26,6 +26,98 @@ from src.utils.representation import (
 logger = logging.getLogger(__name__)
 
 
+def _memory_priority_score(document: models.Document, query: str | None = None) -> int:
+    memory = (document.internal_metadata or {}).get("memory") or {}
+    if not isinstance(memory, dict):
+        return 0
+
+    score = 0
+    thesis_kind = memory.get("thesis_kind")
+    horizon = memory.get("horizon")
+    domain = str(memory.get("domain") or "").lower()
+    query_lc = (query or "").lower()
+
+    thesis_boost = {
+        "rule": 40,
+        "decision": 30,
+        "preference": 25,
+        "fact": 15,
+        "plan": 10,
+        "state": 5,
+    }
+    horizon_boost = {
+        "long": 15,
+        "medium": 8,
+        "short": 2,
+    }
+
+    score += thesis_boost.get(thesis_kind, 0)
+    score += horizon_boost.get(horizon, 0)
+
+    if not query_lc:
+        return score
+
+    intent_token_groups = {
+        "preference": ["prefer", "preference", "like", "want"],
+        "rule": ["rule", "policy", "convention", "instruction"],
+        "decision": ["decide", "decision", "architecture", "why"],
+        "state": ["status", "current", "now", "blocker"],
+        "plan": ["plan", "roadmap", "next", "timeline"],
+        "fact": ["fact", "confirm", "what is", "where is"],
+    }
+    intent_boosts = {
+        "preference": 20,
+        "rule": 20,
+        "decision": 20,
+        "state": 35,
+        "plan": 18,
+        "fact": 12,
+    }
+    horizon_intent_boosts = {
+        "state": {"short": 15, "medium": 6, "long": -10},
+        "plan": {"medium": 10, "short": 4, "long": -4},
+        "preference": {"long": 10, "medium": 3},
+        "rule": {"long": 10, "medium": 3},
+        "decision": {"medium": 8, "long": 6},
+        "fact": {"long": 4, "medium": 2},
+    }
+
+    matching_intents = {
+        intent
+        for intent, tokens in intent_token_groups.items()
+        if any(token in query_lc for token in tokens)
+    }
+
+    if thesis_kind in matching_intents:
+        score += intent_boosts.get(thesis_kind, 0)
+
+    for intent in matching_intents:
+        score += horizon_intent_boosts.get(intent, {}).get(horizon, 0)
+
+    domain_tokens = [
+        token
+        for token in domain.replace(":", "-").replace("_", "-").split("-")
+        if token
+    ]
+    matched_domain_tokens = [token for token in domain_tokens if token in query_lc]
+    if matched_domain_tokens:
+        score += 8 * len(set(matched_domain_tokens))
+        if len(set(matched_domain_tokens)) >= 2:
+            score += 10
+
+    return score
+
+
+def _prioritize_documents(
+    documents: list[models.Document], query: str | None = None
+) -> list[models.Document]:
+    return sorted(
+        documents,
+        key=lambda doc: (_memory_priority_score(doc, query), doc.created_at),
+        reverse=True,
+    )
+
+
 class RepresentationManager:
     """Unified manager for representation and document queries."""
 
@@ -190,6 +282,10 @@ class RepresentationManager:
         semantic_search_top_k: int | None = None,
         semantic_search_max_distance: float | None = None,
         include_most_derived: bool = False,
+        memory_domains: list[str] | None = None,
+        memory_horizons: list[str] | None = None,
+        memory_thesis_kinds: list[str] | None = None,
+        exclude_expired: bool = True,
         max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
     ) -> Representation:
         """
@@ -204,6 +300,10 @@ class RepresentationManager:
             semantic_search_top_k: Number of semantic results
             semantic_search_max_distance: Maximum distance for semantic search
             include_most_derived: Include most derived observations
+            memory_domains: Optional taxonomy domain filters
+            memory_horizons: Optional taxonomy horizon filters
+            memory_thesis_kinds: Optional taxonomy thesis kind filters
+            exclude_expired: Exclude expired/review-due memory items
             max_observations: Maximum total observations to return
 
         Returns:
@@ -223,6 +323,10 @@ class RepresentationManager:
                 semantic_search_top_k=semantic_search_top_k,
                 semantic_search_max_distance=semantic_search_max_distance,
                 include_most_derived=include_most_derived,
+                memory_domains=memory_domains,
+                memory_horizons=memory_horizons,
+                memory_thesis_kinds=memory_thesis_kinds,
+                exclude_expired=exclude_expired,
                 max_observations=max_observations,
             )
 
@@ -237,6 +341,10 @@ class RepresentationManager:
                 semantic_search_top_k=semantic_search_top_k,
                 semantic_search_max_distance=semantic_search_max_distance,
                 include_most_derived=include_most_derived,
+                memory_domains=memory_domains,
+                memory_horizons=memory_horizons,
+                memory_thesis_kinds=memory_thesis_kinds,
+                exclude_expired=exclude_expired,
                 max_observations=max_observations,
             )
 
@@ -252,6 +360,10 @@ class RepresentationManager:
         semantic_search_top_k: int | None = None,
         semantic_search_max_distance: float | None = None,
         include_most_derived: bool = False,
+        memory_domains: list[str] | None = None,
+        memory_horizons: list[str] | None = None,
+        memory_thesis_kinds: list[str] | None = None,
+        exclude_expired: bool = True,
         max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
     ) -> Representation:
         """Internal implementation of get_working_representation."""
@@ -295,6 +407,11 @@ class RepresentationManager:
                 top_k=semantic_observations,
                 max_distance=semantic_search_max_distance,
                 embedding=embedding,
+                filters=self._build_filter_conditions(
+                    memory_domains=memory_domains,
+                    memory_horizons=memory_horizons,
+                    memory_thesis_kinds=memory_thesis_kinds,
+                ),
             )
             representation.merge_representation(
                 Representation.from_documents(semantic_docs)
@@ -303,7 +420,14 @@ class RepresentationManager:
         # Get most derived observations if requested
         if include_most_derived:
             derived_docs = await self._query_documents_most_derived(
-                db, top_k=top_observations
+                db,
+                top_k=top_observations,
+                filters=self._build_filter_conditions(
+                    memory_domains=memory_domains,
+                    memory_horizons=memory_horizons,
+                    memory_thesis_kinds=memory_thesis_kinds,
+                ),
+                exclude_expired=exclude_expired,
             )
             representation.merge_representation(
                 Representation.from_documents(derived_docs)
@@ -311,7 +435,15 @@ class RepresentationManager:
 
         # Get recent observations
         recent_docs = await self._query_documents_recent(
-            db, top_k=recent_observations, session_name=session_name
+            db,
+            top_k=recent_observations,
+            session_name=session_name,
+            filters=self._build_filter_conditions(
+                memory_domains=memory_domains,
+                memory_horizons=memory_horizons,
+                memory_thesis_kinds=memory_thesis_kinds,
+            ),
+            exclude_expired=exclude_expired,
         )
 
         representation.merge_representation(Representation.from_documents(recent_docs))
@@ -326,6 +458,7 @@ class RepresentationManager:
         max_distance: float | None = None,
         level: str | None = None,
         embedding: list[float] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[models.Document]:
         """Query documents by semantic similarity."""
         try:
@@ -337,6 +470,7 @@ class RepresentationManager:
                     top_k,
                     max_distance,
                     embedding=embedding,
+                    filters=filters,
                 )
             else:
                 documents = await crud.query_documents(
@@ -345,63 +479,59 @@ class RepresentationManager:
                     observer=self.observer,
                     observed=self.observed,
                     query=query,
+                    filters=filters,
                     max_distance=max_distance,
                     top_k=top_k,
                     embedding=embedding,
                 )
                 db.expunge_all()
-                return list(documents)
+                return _prioritize_documents(list(documents), query)
 
         except Exception as e:
             logger.error(f"Error getting relevant observations: {e}")
             return []
 
     async def _query_documents_recent(
-        self, db: AsyncSession, top_k: int, session_name: str | None = None
+        self,
+        db: AsyncSession,
+        top_k: int,
+        session_name: str | None = None,
+        filters: dict[str, Any] | None = None,
+        exclude_expired: bool = True,
     ) -> list[models.Document]:
         """Query most recent documents."""
-        stmt = (
-            select(models.Document)
-            .limit(top_k)
-            .where(
-                models.Document.workspace_name == self.workspace_name,
-                models.Document.observer == self.observer,
-                models.Document.observed == self.observed,
-                models.Document.deleted_at.is_(None),
-                *(
-                    [models.Document.session_name == session_name]
-                    if session_name is not None
-                    else []
-                ),
-            )
-            .order_by(models.Document.created_at.desc())
+        documents = await crud.query_documents_recent(
+            db,
+            workspace_name=self.workspace_name,
+            observer=self.observer,
+            observed=self.observed,
+            limit=top_k,
+            session_name=session_name,
+            filters=filters,
+            exclude_expired=exclude_expired,
         )
-
-        result = await db.execute(stmt)
-        documents = result.scalars().all()
         db.expunge_all()
-        return list(documents)
+        return _prioritize_documents(list(documents))
 
     async def _query_documents_most_derived(
-        self, db: AsyncSession, top_k: int
+        self,
+        db: AsyncSession,
+        top_k: int,
+        filters: dict[str, Any] | None = None,
+        exclude_expired: bool = True,
     ) -> list[models.Document]:
         """Query most derived documents."""
-        stmt = (
-            select(models.Document)
-            .limit(top_k)
-            .where(
-                models.Document.workspace_name == self.workspace_name,
-                models.Document.observer == self.observer,
-                models.Document.observed == self.observed,
-                models.Document.deleted_at.is_(None),
-            )
-            .order_by(models.Document.times_derived.desc())
+        documents = await crud.query_documents_most_derived(
+            db,
+            workspace_name=self.workspace_name,
+            observer=self.observer,
+            observed=self.observed,
+            limit=top_k,
+            filters=filters,
+            exclude_expired=exclude_expired,
         )
-
-        result = await db.execute(stmt)
-        documents = result.scalars().all()
         db.expunge_all()
-        return list(documents)
+        return _prioritize_documents(list(documents))
 
     async def _get_observations_internal(
         self,
@@ -424,6 +554,7 @@ class RepresentationManager:
         count: int,
         max_distance: float | None = None,
         embedding: list[float] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[models.Document]:
         """Query documents for a specific level."""
         documents = await crud.query_documents(
@@ -434,7 +565,18 @@ class RepresentationManager:
             query=query,
             max_distance=max_distance,
             top_k=count,
-            filters=self._build_filter_conditions(level),
+            filters=self._build_filter_conditions(
+                level,
+                memory_domains=(filters or {}).get("metadata.memory.domain", {}).get("in")
+                if isinstance((filters or {}).get("metadata.memory.domain"), dict)
+                else None,
+                memory_horizons=(filters or {}).get("metadata.memory.horizon", {}).get("in")
+                if isinstance((filters or {}).get("metadata.memory.horizon"), dict)
+                else None,
+                memory_thesis_kinds=(filters or {}).get("metadata.memory.thesis_kind", {}).get("in")
+                if isinstance((filters or {}).get("metadata.memory.thesis_kind"), dict)
+                else None,
+            ),
             embedding=embedding,
         )
 
@@ -447,6 +589,9 @@ class RepresentationManager:
     def _build_filter_conditions(
         self,
         level: str | None = None,
+        memory_domains: list[str] | None = None,
+        memory_horizons: list[str] | None = None,
+        memory_thesis_kinds: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Build filter conditions for document queries.
@@ -457,6 +602,12 @@ class RepresentationManager:
 
         if level:
             filters["level"] = level
+        if memory_domains:
+            filters["metadata.memory.domain"] = {"in": memory_domains}
+        if memory_horizons:
+            filters["metadata.memory.horizon"] = {"in": memory_horizons}
+        if memory_thesis_kinds:
+            filters["metadata.memory.thesis_kind"] = {"in": memory_thesis_kinds}
 
         return filters
 
@@ -476,6 +627,10 @@ async def get_working_representation(
     semantic_search_top_k: int | None = None,
     semantic_search_max_distance: float | None = None,
     include_most_derived: bool = False,
+    memory_domains: list[str] | None = None,
+    memory_horizons: list[str] | None = None,
+    memory_thesis_kinds: list[str] | None = None,
+    exclude_expired: bool = True,
     max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
 ) -> Representation:
     """
@@ -502,5 +657,9 @@ async def get_working_representation(
         semantic_search_top_k=semantic_search_top_k,
         semantic_search_max_distance=semantic_search_max_distance,
         include_most_derived=include_most_derived,
+        memory_domains=memory_domains,
+        memory_horizons=memory_horizons,
+        memory_thesis_kinds=memory_thesis_kinds,
+        exclude_expired=exclude_expired,
         max_observations=max_observations,
     )

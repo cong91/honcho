@@ -19,6 +19,44 @@ from src.utils.search import search
 
 logger = logging.getLogger(__name__)
 
+
+def _representation_taxonomy_summary(
+    representation: object,
+) -> tuple[list[str], list[str], list[str], bool]:
+    documents = getattr(representation, "observations", []) or []
+    domains: set[str] = set()
+    horizons: set[str] = set()
+    thesis_kinds: set[str] = set()
+    includes_review_due = False
+
+    for document in documents:
+        memory = (getattr(document, "internal_metadata", None) or {}).get("memory") or {}
+        if not isinstance(memory, dict):
+            continue
+
+        domain = memory.get("domain")
+        if isinstance(domain, str) and domain:
+            domains.add(domain)
+
+        horizon = memory.get("horizon")
+        if isinstance(horizon, str) and horizon:
+            horizons.add(horizon)
+
+        thesis_kind = memory.get("thesis_kind")
+        if isinstance(thesis_kind, str) and thesis_kind:
+            thesis_kinds.add(thesis_kind)
+
+        lifecycle = memory.get("lifecycle") or {}
+        if isinstance(lifecycle, dict) and lifecycle.get("review_due_at"):
+            includes_review_due = True
+
+    return (
+        sorted(domains),
+        sorted(horizons),
+        sorted(thesis_kinds),
+        includes_review_due,
+    )
+
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/peers",
     tags=["peers"],
@@ -267,9 +305,20 @@ async def get_representation(
             max_observations=options.max_conclusions
             if options.max_conclusions is not None
             else settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+            memory_domains=options.memory_domains,
+            memory_horizons=options.memory_horizons,
+            memory_thesis_kinds=options.memory_thesis_kinds,
+            exclude_expired=options.exclude_expired,
+        )
+        domains, horizons, thesis_kinds, includes_review_due = (
+            _representation_taxonomy_summary(representation)
         )
         return schemas.RepresentationResponse(
-            representation=representation.format_as_markdown()
+            representation=representation.format_as_markdown(),
+            memory_domains=domains,
+            memory_horizons=horizons,
+            memory_thesis_kinds=thesis_kinds,
+            includes_review_due=includes_review_due,
         )
     except ValueError as e:
         logger.warning(f"Failed to get representation for peer {peer_id}: {str(e)}")
@@ -384,6 +433,22 @@ async def get_peer_context(
         le=100,
         description="Maximum number of conclusions to include in the representation",
     ),
+    memory_domains: list[str] | None = Query(
+        default=None,
+        description="Optional memory taxonomy domains to include in the context representation.",
+    ),
+    memory_horizons: list[str] | None = Query(
+        default=None,
+        description="Optional memory horizons to include in the context representation.",
+    ),
+    memory_thesis_kinds: list[str] | None = Query(
+        default=None,
+        description="Optional memory thesis kinds to include in the context representation.",
+    ),
+    exclude_expired: bool = Query(
+        default=True,
+        description="Whether expired memory should be excluded from the context representation.",
+    ),
     db: AsyncSession = db,
 ):
     """
@@ -414,6 +479,10 @@ async def get_peer_context(
             max_observations=max_conclusions
             if max_conclusions is not None
             else settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+            memory_domains=memory_domains,
+            memory_horizons=memory_horizons,
+            memory_thesis_kinds=memory_thesis_kinds,
+            exclude_expired=exclude_expired,
         )
 
         # Get the peer card
@@ -421,11 +490,19 @@ async def get_peer_context(
             db, workspace_id, observer=peer_id, observed=observed
         )
 
+        domains, horizons, thesis_kinds, includes_review_due = (
+            _representation_taxonomy_summary(representation)
+        )
+
         return schemas.PeerContext(
             peer_id=peer_id,
             target_id=observed,
             representation=representation.format_as_markdown(),
             peer_card=peer_card,
+            memory_domains=domains,
+            memory_horizons=horizons,
+            memory_thesis_kinds=thesis_kinds,
+            includes_review_due=includes_review_due,
         )
     except ValueError as e:
         logger.warning(f"Failed to get context for peer {peer_id}: {str(e)}")

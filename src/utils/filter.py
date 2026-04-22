@@ -3,7 +3,7 @@ from collections.abc import Callable
 from logging import getLogger
 from typing import Any, TypeVar
 
-from sqlalchemy import ColumnElement, Select, and_, case, cast, literal, not_, or_
+from sqlalchemy import ColumnElement, DateTime, Select, and_, case, cast, literal, not_, or_
 from sqlalchemy.types import Numeric
 
 from ..exceptions import FilterError
@@ -213,13 +213,19 @@ def _build_field_condition(
     Returns:
         SQLAlchemy condition object or None
     """
+    json_path: list[str] | None = None
+
     if model_class.__name__ == "Message":
         column_name = ALLOWED_EXTERNAL_TO_INTERNAL_COLUMN_MAPPING_MESSAGES.get(key)
     elif model_class.__name__ == "Document":
-        column_name = ALLOWED_EXTERNAL_TO_INTERNAL_COLUMN_MAPPING_DOCUMENTS.get(
-            key,
-            key,  # fallback to the key itself if not found in the mapping for internal use here
-        )
+        if key.startswith("metadata."):
+            column_name = "internal_metadata"
+            json_path = key.split(".")[1:]
+        else:
+            column_name = ALLOWED_EXTERNAL_TO_INTERNAL_COLUMN_MAPPING_DOCUMENTS.get(
+                key,
+                key,  # fallback to the key itself if not found in the mapping for internal use here
+            )
     else:
         column_name = ALLOWED_EXTERNAL_TO_INTERNAL_COLUMN_MAPPING.get(key)
 
@@ -237,6 +243,9 @@ def _build_field_condition(
     # Handle wildcard - matches everything, so no condition needed
     if value == "*":
         return None
+
+    if json_path:
+        return _build_json_path_condition(column, json_path, value)
 
     # Handle comparison operators vs regular values
     if isinstance(value, dict):
@@ -410,6 +419,10 @@ def _build_nested_metadata_conditions(
                     if len(field_conditions) == 1
                     else and_(*field_conditions)
                 )
+        elif isinstance(field_value, dict):
+            nested_condition = _build_json_path_condition(column, [field_name], field_value)
+            if nested_condition is not None:
+                conditions.append(nested_condition)
         else:
             # Handle wildcard - matches everything, so no condition needed
             if field_value == "*":
@@ -419,6 +432,92 @@ def _build_nested_metadata_conditions(
 
     # Combine all field conditions with AND
     return _combine_conditions_with_and(conditions)
+
+
+def _build_json_path_condition(
+    column: Any, json_path: list[str], value: Any
+) -> ColumnElement[bool] | None:
+    if not json_path:
+        return None
+
+    if value == "*":
+        return None
+
+    if len(json_path) == 1 and isinstance(value, dict) and not any(
+        op in COMPARISON_OPERATORS for op in value
+    ):
+        return _build_nested_metadata_conditions(column[json_path[0]], value)
+
+    accessor = column
+    for part in json_path:
+        accessor = accessor[part]
+
+    if isinstance(value, dict):
+        is_comparison_dict = any(op_key in COMPARISON_OPERATORS for op_key in value)
+        if is_comparison_dict:
+            return _build_json_path_comparison_conditions(accessor, value)
+        return accessor.contains(value)
+
+    return accessor.astext == str(value)
+
+
+def _build_json_path_comparison_conditions(
+    accessor: Any, comparisons: dict[str, Any]
+) -> ColumnElement[bool] | None:
+    conditions: list[ColumnElement[bool]] = []
+    for operator, op_value in comparisons.items():
+        if operator not in COMPARISON_OPERATORS:
+            raise FilterError(f"Unsupported comparison operator: {operator}")
+        if op_value == "*":
+            continue
+        condition = _build_json_path_comparison_condition(accessor, operator, op_value)
+        if condition is not None:
+            conditions.append(condition)
+    return _combine_conditions_with_and(conditions)
+
+
+def _build_json_path_comparison_condition(
+    accessor: Any, operator: str, op_value: Any
+) -> ColumnElement[bool] | None:
+    text_accessor = accessor.astext
+
+    if operator in NUMERIC_OPERATORS:
+        if isinstance(op_value, str):
+            try:
+                parsed_datetime = parse_datetime_iso(op_value)
+            except ValueError:
+                parsed_datetime = None
+            if parsed_datetime is not None:
+                datetime_accessor = cast(text_accessor, DateTime(timezone=True))
+                operator_map: dict[str, Callable[[Any, Any], ColumnElement[bool]]] = {
+                    "gte": lambda a, v: a >= v,
+                    "lte": lambda a, v: a <= v,
+                    "gt": lambda a, v: a > v,
+                    "lt": lambda a, v: a < v,
+                    "ne": lambda a, v: a != v,
+                }
+                return operator_map[operator](datetime_accessor, parsed_datetime)
+        safe_accessor, safe_value = _safe_numeric_cast(text_accessor, op_value)
+        operator_map = {
+            "gte": lambda a, v: a >= v,
+            "lte": lambda a, v: a <= v,
+            "gt": lambda a, v: a > v,
+            "lt": lambda a, v: a < v,
+            "ne": lambda a, v: a != v,
+        }
+        return operator_map[operator](safe_accessor, safe_value)
+    if operator == "in":
+        if hasattr(op_value, "__iter__") and not isinstance(op_value, str | bytes):
+            if "*" in op_value:
+                return None
+            return text_accessor.in_([str(v) for v in op_value])
+        raise FilterError(
+            f"Invalid value for 'in' operator: {op_value}. Expected an iterable (list, tuple, set), got {type(op_value).__name__}"
+        )
+    if operator in ("contains", "icontains"):
+        escaped_value = escape_ilike_pattern(str(op_value))
+        return text_accessor.ilike(f"%{escaped_value}%", escape=ILIKE_ESCAPE_CHAR)
+    return None
 
 
 def _combine_conditions_with_and(

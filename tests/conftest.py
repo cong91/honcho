@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -60,12 +61,25 @@ logger = logging.getLogger(__name__)
 logging.getLogger("sqlalchemy.engine.Engine").disabled = True
 
 # Test database URL
-# TODO use environment variable
-DB_URI = (
-    settings.DB.CONNECTION_URI
-    or "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+# Prefer an explicit test override. If runtime config points at the Docker-only
+# hostname `database`, remap tests to localhost so they work from the host shell.
+DB_URI = settings.DB.CONNECTION_URI or "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+TEST_DB_URI = (
+    os.getenv("TEST_DB_CONNECTION_URI")
+    or os.getenv("DB_TEST_CONNECTION_URI")
+    or DB_URI
 )
-CONNECTION_URI = make_url(DB_URI)
+if "@database:" in TEST_DB_URI:
+    TEST_DB_URI = TEST_DB_URI.replace("@database:", "@localhost:")
+CONNECTION_URI = make_url(TEST_DB_URI)
+
+if CONNECTION_URI.password == "***":
+    CONNECTION_URI = CONNECTION_URI.set(password=os.getenv("TEST_DB_PASSWORD") or "postgres")
+
+
+def _render_db_url(url: URL) -> str:
+    password = url.password or ""
+    return url.render_as_string(hide_password=False).replace("%2A%2A%2A", password)
 
 _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES = (
     # Benchmarks and migration tests have their own execution/runtime constraints.
@@ -137,11 +151,12 @@ def create_test_database(db_url: URL):
     Args:
         db_url (str): Database URL
     """
+    admin_url = db_url.set(database="postgres")
     try:
         logger.debug(f"Checking if database exists: {db_url.database}")
         if not database_exists(db_url):
             logger.info(f"Creating test database: {db_url.database}")
-            create_database(db_url)
+            create_database(admin_url.set(database=db_url.database))
             logger.info(f"Test database created successfully: {db_url.database}")
         else:
             logger.info(f"Database already exists: {db_url.database}")
@@ -160,7 +175,7 @@ async def setup_test_database(db_url: URL):
     Returns:
         engine: SQLAlchemy engine
     """
-    engine = create_async_engine(str(db_url), echo=False)
+    engine = create_async_engine(_render_db_url(db_url), echo=False)
     async with engine.connect() as conn:
         try:
             logger.info("Attempting to create pgvector extension...")

@@ -33,6 +33,53 @@ logger = logging.getLogger(__name__)
 MAX_PEER_CARD_FACTS = 40
 
 
+def _memory_taxonomy_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "domain": {
+                "type": "string",
+                "description": "Memory domain such as user:preferences or project:current-state",
+            },
+            "horizon": {
+                "type": "string",
+                "enum": ["short", "medium", "long"],
+                "description": "Retention horizon for the observation",
+            },
+            "thesis_kind": {
+                "type": "string",
+                "enum": ["preference", "fact", "decision", "plan", "state", "rule"],
+                "description": "Normalized thesis type for the observation",
+            },
+            "expiry": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["none", "review", "date", "event"],
+                    },
+                    "review_at": {"type": "string"},
+                    "expires_at": {"type": "string"},
+                    "event_key": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "Optional confidence in the taxonomy assignment",
+            },
+        },
+        "required": ["domain", "horizon", "thesis_kind"],
+        "additionalProperties": False,
+    }
+
+
+def _normalize_memory_domain(domain: str) -> str:
+    parts = [part.strip().lower().replace(" ", "-") for part in domain.split(":")]
+    return ":".join(part for part in parts if part)
+
+
 def _base_observation_properties() -> dict[str, Any]:
     return {
         "content": {
@@ -91,6 +138,7 @@ def _base_observation_properties() -> dict[str, Any]:
                 + "'medium' for 3-4, 'low' for 2"
             ),
         },
+        "memory": _memory_taxonomy_schema(),
     }
 
 
@@ -376,7 +424,7 @@ def _extract_pattern_snippet(
 TOOLS: dict[str, dict[str, Any]] = {
     "create_observations": {
         "name": "create_observations",
-        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), or contradiction (conflicting statements). For deductive, inductive, and contradiction observations, missing or empty source_ids are invalid and will be rejected.",
+        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), or contradiction (conflicting statements). For deductive, inductive, and contradiction observations, missing or empty source_ids are invalid and will be rejected. For reusable thesis-worthy observations, include memory taxonomy with domain, horizon, thesis_kind, and expiry when relevant.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -391,7 +439,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "create_observations_deductive": {
         "name": "create_observations_deductive",
-        "description": "Create new deductive observations discovered while answering the query. Every observation must include non-empty source_ids and premise text. Use this only for novel deductions grounded in existing observations.",
+        "description": "Create new deductive observations discovered while answering the query. Every observation must include non-empty source_ids and premise text. Use this only for novel deductions grounded in existing observations. For reusable conclusions, include memory taxonomy and set expiry for temporary state.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -406,7 +454,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "create_observations_inductive": {
         "name": "create_observations_inductive",
-        "description": "Create new inductive observations discovered while answering the query. Every observation must include source_ids, source text, pattern_type, and confidence. Use this only for patterns supported by multiple observations.",
+        "description": "Create new inductive observations discovered while answering the query. Every observation must include source_ids, source text, pattern_type, and confidence. Use this only for patterns supported by multiple observations. For stable reusable patterns, include memory taxonomy and prefer long-horizon thesis kinds like preference or rule when appropriate.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -862,6 +910,7 @@ async def create_observations(
             confidence=(obs.confidence or "medium")
             if obs.level == "inductive"
             else None,
+            memory=obs.memory,
         )
 
         doc = schemas.DocumentCreate(
@@ -1222,6 +1271,8 @@ async def _handle_create_observations_impl(
                 )
             )
             continue
+        if validated.memory is not None:
+            validated.memory.domain = _normalize_memory_domain(validated.memory.domain)
         # Deriver can only create explicit observations
         if ctx.current_messages and validated.level != "explicit":
             validation_failures.append(

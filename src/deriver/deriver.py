@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Any
 
 from src import crud
 from src.config import ConfiguredModelSettings, settings
@@ -25,6 +26,44 @@ from src.utils.tokens import track_deriver_input_tokens
 from .prompts import estimate_minimal_deriver_prompt_tokens, minimal_deriver_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_llm_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if hasattr(content, "model_dump_json"):
+        try:
+            return content.model_dump_json()
+        except Exception:
+            pass
+    if hasattr(content, "model_dump"):
+        try:
+            dumped = content.model_dump()
+            return str(dumped)
+        except Exception:
+            pass
+    return repr(content)
+
+
+def _build_deriver_call_kwargs(
+    *,
+    model_config: ConfiguredModelSettings,
+    prompt: str,
+    max_tokens: int,
+    json_mode: bool,
+    response_model: type[PromptRepresentation] | None = PromptRepresentati...[truncated]
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "track_name": "Minimal Deriver",
+        "response_model": PromptRepresentation,
+        "max_input_tokens": settings.DERIVER.MAX_INPUT_TOKENS,
+        "enable_retry": True,
+        "retry_attempts": 3,
+        "trace_name": "minimal_deriver",
+    }
+    if json_mode:
+        kwargs["json_mode"] = True
+    return kwargs
 
 
 def _get_deriver_model_config() -> ConfiguredModelSettings:
@@ -133,18 +172,54 @@ async def process_representation_tasks_batch(
 
     # Single LLM call
     llm_start = time.perf_counter()
-    response = await honcho_llm_call(
+    primary_call_kwargs = _build_deriver_call_kwargs(
         model_config=model_config,
         prompt=prompt,
         max_tokens=max_tokens,
-        track_name="Minimal Deriver",
-        response_model=PromptRepresentation,
         json_mode=True,
-        max_input_tokens=settings.DERIVER.MAX_INPUT_TOKENS,
-        enable_retry=True,
-        retry_attempts=3,
-        trace_name="minimal_deriver",
     )
+    response = await honcho_llm_call(**primary_call_kwargs)
+    raw_output = _serialize_llm_content(response.content)
+
+    message_ids = [m.id for m in messages if m.peer_name == observed]
+
+    observations = Representation.from_prompt_representation(
+        response.content,
+        message_ids,
+        latest_message.session_name,
+        latest_message.created_at,
+    )
+
+    retried_without_json_mode = False
+    fell_back_to_plain_text = False
+    if observations.is_empty() and message_ids:
+        retry_call_kwargs = _build_deriver_call_kwargs(
+            model_config=model_config,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            json_mode=False,
+        )
+        retry_response = await honcho_llm_call(**retry_call_kwargs)
+        raw_output = _serialize_llm_content(retry_response.content)
+        response = retry_response
+        retried_without_json_mode = True
+        observations = Representation.from_prompt_representation(
+            response.content,
+            message_ids,
+            latest_message.session_name,
+            latest_message.created_at,
+        )
+
+    if observations.is_empty() and message_ids and raw_output:
+        plain_text_representation = PromptRepresentation.from_plain_text(raw_output)
+        observations = Representation.from_prompt_representation(
+            plain_text_representation,
+            message_ids,
+            latest_message.session_name,
+            latest_message.created_at,
+        )
+        fell_back_to_plain_text = not observations.is_empty()
+
     llm_duration = (time.perf_counter() - llm_start) * 1000
 
     accumulate_metric(
@@ -163,25 +238,26 @@ async def process_representation_tasks_batch(
             component=DeriverComponents.OUTPUT_TOTAL.value,
         )
 
-    message_ids = [m.id for m in messages if m.peer_name == observed]
-
-    # Convert to Representation and save
-    observations = Representation.from_prompt_representation(
-        response.content,
-        message_ids,
-        latest_message.session_name,
-        latest_message.created_at,
-    )
-
     if observations.is_empty() or not message_ids:
+        retry_suffix = " after schema-only retry" if retried_without_json_mode else ""
         logger.warning(
-            "Deriver generated zero observations for messages %s:%s in %s/%s!",
+            "Deriver generated zero observations for messages %s:%s in %s/%s%s! raw_output=%s",
             earliest_message.id,
             latest_message.id,
             latest_message.workspace_name,
             latest_message.session_name,
+            retry_suffix,
+            raw_output,
         )
     else:
+        if fell_back_to_plain_text:
+            logger.info(
+                "Deriver recovered observations via plain-text fallback for messages %s:%s in %s/%s",
+                earliest_message.id,
+                latest_message.id,
+                latest_message.workspace_name,
+                latest_message.session_name,
+            )
         # Save to all observer collections
         for observer in observers:
             representation_manager = RepresentationManager(

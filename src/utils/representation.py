@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from datetime import datetime
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -40,12 +41,9 @@ def flatten_message_ids(
     result: list[int] = []
     for item in message_ids:
         if isinstance(item, (list | tuple)):
-            # Nested list or tuple - flatten it
             result.extend(item)
         else:
-            # Already flat
             result.append(item)
-    # Remove duplicates and sort
     return sorted(set(result))
 
 
@@ -109,22 +107,52 @@ class ContradictionObservationBase(BaseModel):
 
 
 class PromptRepresentation(BaseModel):
-    """
-    The representation format that is used when getting structured output from an LLM.
-    """
+    """The representation format used when getting structured output from an LLM."""
 
     explicit: list[ExplicitObservationBase] = Field(
-        description="Facts LITERALLY stated by the user - direct quotes or clear paraphrases only, no interpretation or inference. Example: ['The user is 25 years old', 'The user has a dog named Rover']",
+        description="Facts directly stated by the user, expressed as self-contained paraphrases.",
         default_factory=list,
     )
 
     @field_validator("explicit", mode="before")
     @classmethod
     def convert_none_to_empty_list(cls, v: Any) -> Any:
-        """Convert None to empty list - handles LLMs returning null instead of []."""
         if v is None:
             return []
+        if isinstance(v, list):
+            normalized: list[dict[str, str] | ExplicitObservationBase] = []
+            for item in v:
+                if isinstance(item, str):
+                    content = item.strip()
+                    if content:
+                        normalized.append({"content": content})
+                    continue
+                if isinstance(item, dict) and isinstance(item.get("content"), str):
+                    content = item["content"].strip()
+                    if content:
+                        normalized.append({"content": content})
+                    continue
+                normalized.append(item)
+            return normalized
         return v
+
+    @classmethod
+    def from_plain_text(cls, text: str) -> "PromptRepresentation":
+        observations: list[ExplicitObservationBase] = []
+        for line in text.splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            candidate = re.sub(r"^[-*•\d\.)\s]+", "", candidate).strip()
+            if not candidate or candidate in {'{', '}', '[', ']'}:
+                continue
+            if '"content"' in candidate or candidate.lower().startswith('explicit'):
+                continue
+            candidate = candidate.strip('"\' ,')
+            if len(candidate) < 12:
+                continue
+            observations.append(ExplicitObservationBase(content=candidate))
+        return cls(explicit=observations)
 
 
 class ExplicitObservation(ExplicitObservationBase, ObservationMetadata):
@@ -134,21 +162,13 @@ class ExplicitObservation(ExplicitObservationBase, ObservationMetadata):
         return f"[{_strip_microseconds_and_timezone(self.created_at)}] {self.content}"
 
     def str_with_id(self) -> str:
-        """Format with ID prefix for use by agents that need to reference observations."""
         id_prefix = f"[id:{self.id}] " if self.id else ""
         return f"{id_prefix}[{_strip_microseconds_and_timezone(self.created_at)}] {self.content}"
 
     def __hash__(self) -> int:
-        """
-        Make ExplicitObservation hashable for use in sets.
-        """
         return hash((self.content, self.created_at, self.session_name))
 
     def __eq__(self, other: object) -> bool:
-        """
-        Define equality for ExplicitObservation objects.
-        Two observations are equal if all their fields match.
-        """
         if not isinstance(other, ExplicitObservation):
             return False
         return (
@@ -166,7 +186,6 @@ class DeductiveObservation(DeductiveObservationBase, ObservationMetadata):
         return f"[{_strip_microseconds_and_timezone(self.created_at)}] {self.conclusion}\n{premises_text}"
 
     def str_with_id(self) -> str:
-        """Format with ID prefix for use by agents that need to reference observations."""
         id_prefix = f"[id:{self.id}] " if self.id else ""
         premises_text = "\n".join(f"    - {premise}" for premise in self.premises)
         return f"{id_prefix}[{_strip_microseconds_and_timezone(self.created_at)}] {self.conclusion}\n{premises_text}"
@@ -176,16 +195,9 @@ class DeductiveObservation(DeductiveObservationBase, ObservationMetadata):
         return f"{self.conclusion}\n{premises_text}"
 
     def __hash__(self) -> int:
-        """
-        Make DeductiveObservation hashable for use in sets. NOTE: premises are not included in the hash.
-        """
         return hash((self.conclusion, self.created_at, self.session_name))
 
     def __eq__(self, other: object) -> bool:
-        """
-        Define equality for DeductiveObservation objects.
-        Two observations are equal if all their fields match -- NOTE: premises are not included in the equality check.
-        """
         if not isinstance(other, DeductiveObservation):
             return False
         return (
@@ -206,7 +218,6 @@ class InductiveObservation(InductiveObservationBase, ObservationMetadata):
         return f"[{_strip_microseconds_and_timezone(self.created_at)}] [{self.confidence}] {self.conclusion}{sources_text}"
 
     def str_with_id(self) -> str:
-        """Format with ID prefix for use by agents that need to reference observations."""
         id_prefix = f"[id:{self.id}] " if self.id else ""
         sources_text = ""
         if self.sources:
@@ -222,11 +233,9 @@ class InductiveObservation(InductiveObservationBase, ObservationMetadata):
         return f"[{self.confidence}] {self.conclusion}{sources_text}"
 
     def __hash__(self) -> int:
-        """Make InductiveObservation hashable for use in sets."""
         return hash((self.conclusion, self.created_at, self.session_name))
 
     def __eq__(self, other: object) -> bool:
-        """Define equality for InductiveObservation objects."""
         if not isinstance(other, InductiveObservation):
             return False
         return (
@@ -237,37 +246,19 @@ class InductiveObservation(InductiveObservationBase, ObservationMetadata):
 
 
 class ContradictionObservation(ContradictionObservationBase, ObservationMetadata):
-    """Contradiction observation - notes when user has made conflicting statements, plus metadata."""
-
     def __str__(self) -> str:
-        sources_text = ""
-        if self.sources:
-            source_lines = [f"    - {source}" for source in self.sources]
-            sources_text = "\n" + "\n".join(source_lines)
-        return f"[{_strip_microseconds_and_timezone(self.created_at)}] CONTRADICTION: {self.content}{sources_text}"
+        sources_text = "\n".join(f"    - {source}" for source in self.sources)
+        return f"[{_strip_microseconds_and_timezone(self.created_at)}] CONTRADICTION: {self.content}\n{sources_text}"
 
     def str_with_id(self) -> str:
-        """Format with ID prefix for use by agents that need to reference observations."""
         id_prefix = f"[id:{self.id}] " if self.id else ""
-        sources_text = ""
-        if self.sources:
-            source_lines = [f"    - {source}" for source in self.sources]
-            sources_text = "\n" + "\n".join(source_lines)
-        return f"{id_prefix}[{_strip_microseconds_and_timezone(self.created_at)}] CONTRADICTION: {self.content}{sources_text}"
-
-    def str_no_timestamps(self) -> str:
-        sources_text = ""
-        if self.sources:
-            source_lines = [f"    - {source}" for source in self.sources]
-            sources_text = "\n" + "\n".join(source_lines)
-        return f"CONTRADICTION: {self.content}{sources_text}"
+        sources_text = "\n".join(f"    - {source}" for source in self.sources)
+        return f"{id_prefix}[{_strip_microseconds_and_timezone(self.created_at)}] CONTRADICTION: {self.content}\n{sources_text}"
 
     def __hash__(self) -> int:
-        """Make ContradictionObservation hashable for use in sets."""
         return hash((self.content, self.created_at, self.session_name))
 
     def __eq__(self, other: object) -> bool:
-        """Define equality for ContradictionObservation objects."""
         if not isinstance(other, ContradictionObservation):
             return False
         return (
@@ -278,260 +269,23 @@ class ContradictionObservation(ContradictionObservationBase, ObservationMetadata
 
 
 class Representation(BaseModel):
-    """
-    A Representation is a traversable and diffable map of observations.
-    At the base, we have a list of explicit observations, derived from a peer's messages.
+    """A Representation is a traversable and diffable map of observations."""
 
-    From there, deductive observations can be made by establishing logical relationships between explicit observations.
-
-    In the future, we can add more levels of reasoning on top of these.
-
-    All of a peer's observations are stored as documents in a collection. These documents can be queried in various ways
-    to produce this Representation object.
-
-    Additionally, a "working representation" is a version of this data structure representing the most recent observations
-    within a single session.
-
-    A representation can have a maximum number of observations, which is applied individually to each level of reasoning.
-    If a maximum is set, observations are added and removed in FIFO order.
-    """
-
-    explicit: list[ExplicitObservation] = Field(
-        description="Facts LITERALLY stated by the user - direct quotes or clear paraphrases only, no interpretation or inference. Example: ['The user is 25 years old', 'The user has a dog']",
-        default_factory=list,
-    )
-    deductive: list[DeductiveObservation] = Field(
-        description="Conclusions that MUST be true given explicit facts and premises - strict logical necessities. Each deduction should have premises and a single conclusion.",
-        default_factory=list,
-    )
-    inductive: list[InductiveObservation] = Field(
-        description="Patterns, generalizations, and personality insights inferred from multiple observations. Higher-level reasoning created by the Dreamer agent.",
-        default_factory=list,
-    )
-    contradiction: list[ContradictionObservation] = Field(
-        description="Conflicting statements made by the user that need clarification. The dialectic agent should surface these when relevant.",
-        default_factory=list,
-    )
+    explicit: list[ExplicitObservation] = Field(default_factory=list)
+    deductive: list[DeductiveObservation] = Field(default_factory=list)
+    inductive: list[InductiveObservation] = Field(default_factory=list)
+    contradiction: list[ContradictionObservation] = Field(default_factory=list)
 
     def is_empty(self) -> bool:
-        """
-        Check if the representation is empty.
-        """
-        return (
-            len(self.explicit) == 0
-            and len(self.deductive) == 0
-            and len(self.inductive) == 0
-            and len(self.contradiction) == 0
-        )
+        return not (self.explicit or self.deductive or self.inductive or self.contradiction)
 
-    def len(self) -> int:
-        """
-        Return the total number of observations in the representation.
-        """
-        return (
-            len(self.explicit)
-            + len(self.deductive)
-            + len(self.inductive)
-            + len(self.contradiction)
-        )
-
-    def diff_representation(self, other: "Representation") -> "Representation":
-        """
-        Given this and another representation, return a new representation with only observations that are unique to the other.
-        Note that this only removes literal duplicates, not semantically equivalent ones.
-        """
-        diff = Representation()
-        diff.explicit = [o for o in other.explicit if o not in self.explicit]
-        diff.deductive = [o for o in other.deductive if o not in self.deductive]
-        diff.inductive = [o for o in other.inductive if o not in self.inductive]
-        diff.contradiction = [
-            o for o in other.contradiction if o not in self.contradiction
-        ]
-        return diff
-
-    def merge_representation(
-        self, other: "Representation", max_observations: int | None = None
-    ):
-        """
-        Merge another representation object into this one.
-        This will automatically deduplicate explicit, deductive, inductive, and contradiction observations.
-        This *preserves order* of observations so that they retain FIFO order.
-
-        NOTE: observations with the *same* timestamp will not have order preserved.
-        That's fine though, because they are from the same timestamp...
-        """
-        # removing duplicates by going list->set->list
-        self.explicit = list(set(self.explicit + other.explicit))
-        self.deductive = list(set(self.deductive + other.deductive))
-        self.inductive = list(set(self.inductive + other.inductive))
-        self.contradiction = list(set(self.contradiction + other.contradiction))
-        # sort by created_at
-        self.explicit.sort(key=lambda x: x.created_at)
-        self.deductive.sort(key=lambda x: x.created_at)
-        self.inductive.sort(key=lambda x: x.created_at)
-        self.contradiction.sort(key=lambda x: x.created_at)
-
-        if max_observations:
-            self.explicit = self.explicit[-max_observations:]
-            self.deductive = self.deductive[-max_observations:]
-            self.inductive = self.inductive[-max_observations:]
-            self.contradiction = self.contradiction[-max_observations:]
-
-    def __str__(self) -> str:
-        """
-        Format representation into a clean, readable string for LLM prompts.
-        NOTE: we always strip subsecond precision from the timestamps.
-
-        Returns:
-            Formatted string with clear sections and bullet points including temporal metadata
-            Example:
-            EXPLICIT:
-            1. [2025-01-01 12:00:00] The user has a dog named Rover
-            2. [2025-01-01 12:01:00] The user's dog is 5 years old
-            3. [2025-01-01 12:05:00] The user is 25 years old
-            DEDUCTIVE:
-            1. [2025-01-01 12:01:00] Rover is 5 years old
-                - The user has a dog named Rover
-                - The user's dog is 5 years old
-
-        """
-
+    def to_markdown(self, include_ids: bool = False) -> str:
         parts: list[str] = []
-
-        parts.append("EXPLICIT:\n")
-        for i, observation in enumerate(self.explicit, 1):
-            parts.append(f"{i}. {observation}")
-        parts.append("")
-
-        parts.append("DEDUCTIVE:\n")
-        for i, observation in enumerate(self.deductive, 1):
-            parts.append(f"{i}. {observation}")
-        parts.append("")
-
-        parts.append("INDUCTIVE:\n")
-        for i, observation in enumerate(self.inductive, 1):
-            parts.append(f"{i}. {observation}")
-        parts.append("")
-
-        parts.append("CONTRADICTION:\n")
-        for i, observation in enumerate(self.contradiction, 1):
-            parts.append(f"{i}. {observation}")
-        parts.append("")
-
-        return "\n".join(parts)
-
-    def str_with_ids(self) -> str:
-        """
-        Format representation with observation IDs for agents that need to reference/delete observations.
-
-        Returns:
-            Formatted string with IDs included
-            Example:
-            EXPLICIT:
-            1. [id:abc123] [2025-01-01 12:00:00] The user has a dog named Rover
-            2. [id:def456] [2025-01-01 12:01:00] The user's dog is 5 years old
-            DEDUCTIVE:
-            1. [id:ghi789] [2025-01-01 12:01:00] Rover is 5 years old
-                - The user has a dog named Rover
-                - The user's dog is 5 years old
-            INDUCTIVE:
-            1. [id:jkl012] [2025-01-01 12:05:00] [high] User tends to be methodical
-                - id:abc123
-                - id:def456
-        """
-        parts: list[str] = []
-
-        parts.append("EXPLICIT:\n")
-        for i, observation in enumerate(self.explicit, 1):
-            parts.append(f"{i}. {observation.str_with_id()}")
-        parts.append("")
-
-        parts.append("DEDUCTIVE:\n")
-        for i, observation in enumerate(self.deductive, 1):
-            parts.append(f"{i}. {observation.str_with_id()}")
-        parts.append("")
-
-        parts.append("INDUCTIVE:\n")
-        for i, observation in enumerate(self.inductive, 1):
-            parts.append(f"{i}. {observation.str_with_id()}")
-        parts.append("")
-
-        parts.append("CONTRADICTION:\n")
-        for i, observation in enumerate(self.contradiction, 1):
-            parts.append(f"{i}. {observation.str_with_id()}")
-        parts.append("")
-
-        return "\n".join(parts)
-
-    def str_no_timestamps(self) -> str:
-        """
-        Format representation into a clean, readable string for LLM prompts... but without timestamps.
-
-        Returns:
-            Formatted string with clear sections and bullet points including temporal metadata
-            Example:
-            EXPLICIT:
-            1. The user has a dog named Rover
-            2. The user's dog is 5 years old
-            3. The user is 25 years old
-            DEDUCTIVE:
-            1. Rover is 5 years old
-                - The user has a dog named Rover
-                - The user's dog is 5 years old
-            INDUCTIVE:
-            1. [high] User tends to be methodical
-                - id:abc123
-                - id:def456
-
-        """
-        parts: list[str] = []
-
-        parts.append("EXPLICIT:\n")
-        for i, observation in enumerate(self.explicit, 1):
-            parts.append(f"{i}. {observation.content}")
-        parts.append("")
-
-        parts.append("DEDUCTIVE:\n")
-        for i, observation in enumerate(self.deductive, 1):
-            parts.append(f"{i}. {observation.str_no_timestamps()}")
-        parts.append("")
-
-        parts.append("INDUCTIVE:\n")
-        for i, observation in enumerate(self.inductive, 1):
-            parts.append(f"{i}. {observation.str_no_timestamps()}")
-        parts.append("")
-
-        parts.append("CONTRADICTION:\n")
-        for i, observation in enumerate(self.contradiction, 1):
-            parts.append(f"{i}. {observation.str_no_timestamps()}")
-        parts.append("")
-
-        return "\n".join(parts)
-
-    def format_as_markdown(self, include_ids: bool = False) -> str:
-        """
-        Format a Representation object as markdown.
-        NOTE: we always strip subsecond precision from the timestamps.
-
-        Args:
-            include_ids: If True, include observation IDs for use with get_reasoning_chain
-
-        Returns:
-            Formatted markdown string
-        """
-
-        parts: list[str] = []
-
-        # Add explicit observations
         if self.explicit:
             parts.append("## Explicit Observations\n")
             for obs in self.explicit:
-                # Don't need IDs for explicit as these are the lowest level of reasoning.
-                # id_prefix = f"[id:{obs.id}] " if include_ids and obs.id else ""
                 parts.append(f"{obs}")
             parts.append("")
-
-        # Add deductive observations
         if self.deductive:
             parts.append("## Deductive Observations\n")
             for obs in self.deductive:
@@ -544,15 +298,11 @@ class Representation(BaseModel):
                         parts.append(f"   - {premise}")
                 parts.append("")
             parts.append("")
-
-        # Add inductive observations
         if self.inductive:
             parts.append("## Inductive Observations\n")
             for obs in self.inductive:
                 id_prefix = f"[id:{obs.id}] " if include_ids and obs.id else ""
-                parts.append(
-                    f"{id_prefix} **Pattern** [{obs.confidence}]: {obs.conclusion}"
-                )
+                parts.append(f"{id_prefix} **Pattern** [{obs.confidence}]: {obs.conclusion}")
                 if obs.pattern_type:
                     parts.append(f"   **Type**: {obs.pattern_type}")
                 if obs.sources:
@@ -563,8 +313,6 @@ class Representation(BaseModel):
                         parts.append(f"   - ... and {len(obs.sources) - 5} more")
                 parts.append("")
             parts.append("")
-
-        # Add contradiction observations
         if self.contradiction:
             parts.append("## Contradictions\n")
             for obs in self.contradiction:
@@ -576,7 +324,6 @@ class Representation(BaseModel):
                         parts.append(f"   - {source}")
                 parts.append("")
             parts.append("")
-
         return "\n".join(parts)
 
     @classmethod
@@ -585,13 +332,9 @@ class Representation(BaseModel):
             explicit=[
                 ExplicitObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(
-                        doc.internal_metadata, doc.created_at
-                    ),
+                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
                     content=doc.content,
-                    message_ids=flatten_message_ids(
-                        doc.internal_metadata.get("message_ids", [])
-                    ),
+                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
                     session_name=doc.session_name,
                 )
                 for doc in documents
@@ -600,17 +343,11 @@ class Representation(BaseModel):
             deductive=[
                 DeductiveObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(
-                        doc.internal_metadata, doc.created_at
-                    ),
+                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
                     conclusion=doc.content,
-                    message_ids=flatten_message_ids(
-                        doc.internal_metadata.get("message_ids", [])
-                    ),
+                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
                     session_name=doc.session_name,
-                    # Support both top-level and metadata locations for backward compatibility
-                    source_ids=doc.source_ids
-                    or doc.internal_metadata.get("premise_ids", []),
+                    source_ids=doc.source_ids or doc.internal_metadata.get("premise_ids", []),
                     premises=doc.internal_metadata.get("premises", []),
                 )
                 for doc in documents
@@ -619,15 +356,11 @@ class Representation(BaseModel):
             inductive=[
                 InductiveObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(
-                        doc.internal_metadata, doc.created_at
-                    ),
+                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
                     conclusion=doc.content,
                     message_ids=doc.internal_metadata.get("message_ids", []),
                     session_name=doc.session_name,
-                    # Support both top-level and metadata locations for backward compatibility
-                    source_ids=doc.source_ids
-                    or doc.internal_metadata.get("source_ids", []),
+                    source_ids=doc.source_ids or doc.internal_metadata.get("source_ids", []),
                     sources=doc.internal_metadata.get("sources", []),
                     pattern_type=doc.internal_metadata.get("pattern_type", "pattern"),
                     confidence=doc.internal_metadata.get("confidence", "medium"),
@@ -638,15 +371,11 @@ class Representation(BaseModel):
             contradiction=[
                 ContradictionObservation(
                     id=doc.id,
-                    created_at=_safe_datetime_from_metadata(
-                        doc.internal_metadata, doc.created_at
-                    ),
+                    created_at=_safe_datetime_from_metadata(doc.internal_metadata, doc.created_at),
                     content=doc.content,
-                    message_ids=doc.internal_metadata.get("message_ids", []),
+                    message_ids=flatten_message_ids(doc.internal_metadata.get("message_ids", [])),
                     session_name=doc.session_name,
-                    # Support both top-level and metadata locations for backward compatibility
-                    source_ids=doc.source_ids
-                    or doc.internal_metadata.get("source_ids", []),
+                    source_ids=doc.source_ids or doc.internal_metadata.get("source_ids", []),
                     sources=doc.internal_metadata.get("sources", []),
                 )
                 for doc in documents
@@ -662,7 +391,6 @@ class Representation(BaseModel):
         session_name: str,
         created_at: datetime,
     ) -> "Representation":
-        """Convert PromptRepresentation to Representation."""
         return cls(
             explicit=[
                 ExplicitObservation(
@@ -684,15 +412,11 @@ def _safe_datetime_from_metadata(
     message_created_at = internal_metadata.get("message_created_at")
     if message_created_at is None:
         return _strip_microseconds_and_timezone(fallback_datetime)
-
     if isinstance(message_created_at, str):
         try:
-            return _strip_microseconds_and_timezone(
-                parse_datetime_iso(message_created_at)
-            )
+            return _strip_microseconds_and_timezone(parse_datetime_iso(message_created_at))
         except ValueError:
             return _strip_microseconds_and_timezone(fallback_datetime)
-
     if isinstance(message_created_at, datetime):
         return _strip_microseconds_and_timezone(message_created_at)
     return _strip_microseconds_and_timezone(fallback_datetime)

@@ -1,4 +1,6 @@
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -623,6 +625,110 @@ def test_get_peer_representation_default_max_observations(
     assert response.status_code == 200
     data = response.json()
     assert "representation" in data
+
+
+def test_get_peer_representation_with_memory_taxonomy_filters(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Representation route forwards taxonomy memory filters to retrieval."""
+    test_workspace, test_peer = sample_data
+
+    with patch(
+        "src.routers.peers.crud.get_working_representation",
+        new_callable=AsyncMock,
+    ) as mock_get_representation:
+        mock_representation = Mock()
+        mock_representation.format_as_markdown.return_value = "# representation"
+        mock_representation.observations = [
+            SimpleNamespace(
+                internal_metadata={
+                    "memory": {
+                        "domain": "user:preferences",
+                        "horizon": "long",
+                        "thesis_kind": "preference",
+                        "lifecycle": {"review_due_at": "2026-01-01T00:00:00Z"},
+                    }
+                }
+            )
+        ]
+        mock_get_representation.return_value = mock_representation
+
+        response = client.post(
+            f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/representation",
+            json={
+                "memory_domains": ["user:preferences"],
+                "memory_horizons": ["long"],
+                "memory_thesis_kinds": ["preference"],
+                "exclude_expired": True,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    kwargs = mock_get_representation.await_args.kwargs
+    assert kwargs["memory_domains"] == ["user:preferences"]
+    assert kwargs["memory_horizons"] == ["long"]
+    assert kwargs["memory_thesis_kinds"] == ["preference"]
+    assert kwargs["exclude_expired"] is True
+    assert data["memory_domains"] == ["user:preferences"]
+    assert data["memory_horizons"] == ["long"]
+    assert data["memory_thesis_kinds"] == ["preference"]
+    assert data["includes_review_due"] is True
+
+
+def test_get_peer_context_with_memory_taxonomy_filters(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Peer context forwards taxonomy filters and returns surfaced taxonomy summary."""
+    test_workspace, test_peer = sample_data
+
+    with (
+        patch(
+            "src.routers.peers.crud.get_working_representation",
+            new_callable=AsyncMock,
+        ) as mock_get_representation,
+        patch(
+            "src.routers.peers.crud.get_peer_card",
+            new_callable=AsyncMock,
+        ) as mock_get_peer_card,
+    ):
+        mock_representation = Mock()
+        mock_representation.format_as_markdown.return_value = "# context"
+        mock_representation.observations = [
+            SimpleNamespace(
+                internal_metadata={
+                    "memory": {
+                        "domain": "project:payments",
+                        "horizon": "medium",
+                        "thesis_kind": "decision",
+                    }
+                }
+            )
+        ]
+        mock_get_representation.return_value = mock_representation
+        mock_get_peer_card.return_value = ["Uses Stripe"]
+
+        response = client.get(
+            f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/context",
+            params={
+                "memory_domains": "project:payments",
+                "memory_horizons": "medium",
+                "memory_thesis_kinds": "decision",
+                "exclude_expired": "true",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    kwargs = mock_get_representation.await_args.kwargs
+    assert kwargs["memory_domains"] == ["project:payments"]
+    assert kwargs["memory_horizons"] == ["medium"]
+    assert kwargs["memory_thesis_kinds"] == ["decision"]
+    assert kwargs["exclude_expired"] is True
+    assert data["memory_domains"] == ["project:payments"]
+    assert data["memory_horizons"] == ["medium"]
+    assert data["memory_thesis_kinds"] == ["decision"]
+    assert data["includes_review_due"] is False
 
 
 def test_search_peer(client: TestClient, sample_data: tuple[Workspace, Peer]):
